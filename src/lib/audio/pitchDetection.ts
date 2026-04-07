@@ -1,11 +1,9 @@
-// Pitch detection using Web Audio API
-// YIN-based autocorrelation for single-note, FFT chromagram for chords
+// Two-layer pitch detection:
+// 1. Pitchy — real-time single-note detection (fast, accurate)
+// 2. Spotify Basic Pitch — ML polyphonic chord detection (buffered)
 
-import { freqToNearestMidi, midiToPitchClass, midiToFreq } from '../music/theory';
-
-const FFT_SIZE = 4096;
-const MIN_FREQ = 65;   // ~C2 (lowest practical piano note for phone mic)
-const MAX_FREQ = 2100;  // ~C7 (avoid high-frequency noise false positives)
+import { PitchDetector as PitchyDetector } from 'pitchy';
+import { freqToNearestMidi, midiToPitchClass, freqToCentsOff } from '../music/theory';
 
 export interface PitchResult {
   frequency: number;
@@ -16,8 +14,21 @@ export interface PitchResult {
 export interface ChromaResult {
   chroma: number[];
   activePitchClasses: number[];
+  activeMidis: number[]; // ML-detected MIDI notes
   dominantPitchClass: number;
   rms: number;
+}
+
+// Downsample audio from source rate to target rate
+function downsample(buffer: Float32Array, fromRate: number, toRate: number): Float32Array {
+  if (fromRate === toRate) return buffer;
+  const ratio = fromRate / toRate;
+  const newLength = Math.floor(buffer.length / ratio);
+  const result = new Float32Array(newLength);
+  for (let i = 0; i < newLength; i++) {
+    result[i] = buffer[Math.floor(i * ratio)];
+  }
+  return result;
 }
 
 export class PitchDetector {
@@ -26,19 +37,45 @@ export class PitchDetector {
   private source: MediaStreamAudioSourceNode | null = null;
   private stream: MediaStream | null = null;
   private timeBuf: Float32Array<ArrayBuffer> | null = null;
-  private freqBuf: Float32Array<ArrayBuffer> | null = null;
   private running = false;
+
+  // Pitchy detector for single notes
+  private pitchyDetector: ReturnType<typeof PitchyDetector.forFloat32Array> | null = null;
+
+  // Basic Pitch ML model for chords
+  private basicPitchModel: import('@spotify/basic-pitch').BasicPitch | null = null;
+  private modelLoading = false;
+  private modelReady = false;
+
+  // Audio buffer for ML chord detection
+  private audioRingBuffer: Float32Array | null = null;
+  private ringBufferWritePos = 0;
+  private readonly RING_BUFFER_SECONDS = 1.5;
+
+  // Script processor for capturing raw audio
+  private scriptNode: ScriptProcessorNode | null = null;
+
+  // Latest ML chord results
+  private _mlMidis: number[] = [];
+  private _mlChroma: number[] = new Array(12).fill(0);
+  private _mlLastUpdate = 0;
+  private _mlProcessing = false;
+
+  private static readonly FFT_SIZE = 4096;
 
   private init(): void {
     if (this.audioCtx) return;
     this.audioCtx = new AudioContext();
     this.analyser = this.audioCtx.createAnalyser();
-    this.analyser.fftSize = FFT_SIZE;
+    this.analyser.fftSize = PitchDetector.FFT_SIZE;
     this.analyser.smoothingTimeConstant = 0.8;
-    this.analyser.minDecibels = -80;
-    this.analyser.maxDecibels = -10;
-    this.timeBuf = new Float32Array(FFT_SIZE);
-    this.freqBuf = new Float32Array(this.analyser.frequencyBinCount);
+    this.timeBuf = new Float32Array(PitchDetector.FFT_SIZE);
+    this.pitchyDetector = PitchyDetector.forFloat32Array(PitchDetector.FFT_SIZE);
+
+    // Ring buffer for ML model (stores last N seconds at mic sample rate)
+    const bufLen = Math.ceil(this.audioCtx.sampleRate * this.RING_BUFFER_SECONDS);
+    this.audioRingBuffer = new Float32Array(bufLen);
+    this.ringBufferWritePos = 0;
   }
 
   async start(): Promise<void> {
@@ -49,23 +86,57 @@ export class PitchDetector {
         audio: {
           echoCancellation: false,
           noiseSuppression: false,
-          autoGainControl: true, // Let the OS handle gain — avoids manual clipping issues
+          autoGainControl: true,
         },
       });
       this.source = this.audioCtx!.createMediaStreamSource(this.stream);
-      // Clean signal path: mic → analyser directly. No compressor, no gain.
       this.source.connect(this.analyser!);
+
+      // Script processor to capture raw audio into ring buffer
+      this.scriptNode = this.audioCtx!.createScriptProcessor(4096, 1, 1);
+      this.scriptNode.onaudioprocess = (e) => {
+        const input = e.inputBuffer.getChannelData(0);
+        const ring = this.audioRingBuffer!;
+        for (let i = 0; i < input.length; i++) {
+          ring[this.ringBufferWritePos] = input[i];
+          this.ringBufferWritePos = (this.ringBufferWritePos + 1) % ring.length;
+        }
+      };
+      this.source.connect(this.scriptNode);
+      this.scriptNode.connect(this.audioCtx!.destination); // Required for scriptProcessor to work
+
       if (this.audioCtx!.state === 'suspended') {
         await this.audioCtx!.resume();
       }
       this.running = true;
+
+      // Load ML model in background
+      this.loadModel();
     } catch (err) {
-      console.error('Microphone access error:', err);
+      console.error('Microphone error:', err);
       throw err;
     }
   }
 
+  private async loadModel(): Promise<void> {
+    if (this.modelLoading || this.modelReady) return;
+    this.modelLoading = true;
+    try {
+      const { BasicPitch } = await import('@spotify/basic-pitch');
+      this.basicPitchModel = new BasicPitch('/model/model.json');
+      this.modelReady = true;
+      console.log('Basic Pitch ML model loaded');
+    } catch (err) {
+      console.warn('Could not load Basic Pitch model, using fallback:', err);
+    }
+    this.modelLoading = false;
+  }
+
   stop(): void {
+    if (this.scriptNode) {
+      this.scriptNode.disconnect();
+      this.scriptNode = null;
+    }
     if (this.source) {
       this.source.disconnect();
       this.source = null;
@@ -81,9 +152,9 @@ export class PitchDetector {
     return this.running;
   }
 
-  // Get RMS from already-read time domain buffer
-  private computeRMS(): number {
-    if (!this.timeBuf) return 0;
+  getRMS(): number {
+    if (!this.analyser || !this.timeBuf) return 0;
+    this.analyser.getFloatTimeDomainData(this.timeBuf);
     let sum = 0;
     for (let i = 0; i < this.timeBuf.length; i++) {
       sum += this.timeBuf[i] * this.timeBuf[i];
@@ -91,157 +162,159 @@ export class PitchDetector {
     return Math.sqrt(sum / this.timeBuf.length);
   }
 
-  // Public RMS that reads fresh data
-  getRMS(): number {
-    if (!this.analyser || !this.timeBuf) return 0;
-    this.analyser.getFloatTimeDomainData(this.timeBuf);
-    return this.computeRMS();
-  }
-
-  // YIN-based pitch detection
+  // ── Single-note detection via Pitchy ──
   detectPitch(): PitchResult | null {
-    if (!this.running || !this.analyser || !this.timeBuf || !this.audioCtx) return null;
+    if (!this.running || !this.analyser || !this.timeBuf || !this.pitchyDetector || !this.audioCtx) {
+      return null;
+    }
 
-    // Read time domain data ONCE — all analysis uses this same snapshot
     this.analyser.getFloatTimeDomainData(this.timeBuf);
 
-    const rms = this.computeRMS();
-    if (rms < 0.008) return null; // Silence gate
-
-    const sampleRate = this.audioCtx.sampleRate;
-    const buf = this.timeBuf;
-    // Only use first half of buffer for autocorrelation (more stable)
-    const halfN = Math.floor(buf.length / 2);
-
-    const minPeriod = Math.floor(sampleRate / MAX_FREQ);
-    const maxPeriod = Math.min(Math.floor(sampleRate / MIN_FREQ), halfN);
-
-    // YIN step 2: Difference function
-    const diff = new Float32Array(maxPeriod + 1);
-    for (let tau = 0; tau <= maxPeriod; tau++) {
-      let sum = 0;
-      for (let i = 0; i < halfN; i++) {
-        const d = buf[i] - buf[i + tau];
-        sum += d * d;
-      }
-      diff[tau] = sum;
+    // Check signal level
+    let sum = 0;
+    for (let i = 0; i < this.timeBuf.length; i++) {
+      sum += this.timeBuf[i] * this.timeBuf[i];
     }
+    const rms = Math.sqrt(sum / this.timeBuf.length);
+    if (rms < 0.008) return null;
 
-    // YIN step 3: Cumulative mean normalized difference
-    const cmndf = new Float32Array(maxPeriod + 1);
-    cmndf[0] = 1;
-    let runningSum = 0;
-    for (let tau = 1; tau <= maxPeriod; tau++) {
-      runningSum += diff[tau];
-      cmndf[tau] = runningSum > 0 ? diff[tau] * tau / runningSum : 1;
-    }
+    const [pitch, clarity] = this.pitchyDetector.findPitch(
+      this.timeBuf,
+      this.audioCtx.sampleRate
+    );
 
-    // YIN step 4: Absolute threshold
-    // Find the first dip below threshold, then take the minimum in that valley
-    const yinThreshold = 0.15;
-    let bestTau = -1;
+    // Pitchy clarity threshold — higher = more confident
+    if (clarity < 0.85 || pitch < 60 || pitch > 2100) return null;
 
-    for (let tau = minPeriod; tau < maxPeriod; tau++) {
-      if (cmndf[tau] < yinThreshold) {
-        // Found a dip — walk forward to find the valley minimum
-        while (tau + 1 < maxPeriod && cmndf[tau + 1] < cmndf[tau]) {
-          tau++;
-        }
-        bestTau = tau;
-        break;
-      }
-    }
+    const midi = freqToNearestMidi(pitch);
 
-    // Fallback: if no dip below threshold, find the global minimum in range
-    if (bestTau < 0) {
-      let minVal = Infinity;
-      for (let tau = minPeriod; tau <= maxPeriod; tau++) {
-        if (cmndf[tau] < minVal) {
-          minVal = cmndf[tau];
-          bestTau = tau;
-        }
-      }
-      // Only accept if reasonably periodic
-      if (minVal > 0.4) return null;
-    }
-
-    if (bestTau < 0) return null;
-
-    // YIN step 5: Parabolic interpolation for sub-sample accuracy
-    let refinedTau = bestTau;
-    if (bestTau > 0 && bestTau < maxPeriod) {
-      const s0 = cmndf[bestTau - 1];
-      const s1 = cmndf[bestTau];
-      const s2 = cmndf[bestTau + 1];
-      const denom = 2 * s1 - s2 - s0;
-      if (denom !== 0) {
-        refinedTau = bestTau + (s0 - s2) / (2 * denom);
-      }
-    }
-
-    const frequency = sampleRate / refinedTau;
-
-    // Sanity check
-    if (frequency < MIN_FREQ || frequency > MAX_FREQ) return null;
-
-    const midi = freqToNearestMidi(frequency);
-    const confidence = 1 - cmndf[bestTau]; // Higher = better (0 to 1)
-
-    return { frequency, midi, confidence };
+    return {
+      frequency: pitch,
+      midi,
+      confidence: clarity,
+    };
   }
 
-  // Chromagram for chord detection
+  // ── Chord detection via ML (Spotify Basic Pitch) ──
+  // Called periodically (not every frame) — returns cached results between updates
   getChroma(): ChromaResult {
-    if (!this.analyser || !this.freqBuf || !this.audioCtx) {
-      return { chroma: new Array(12).fill(0), activePitchClasses: [], dominantPitchClass: 0, rms: 0 };
+    const rms = this.getRMS();
+    const now = Date.now();
+
+    // Trigger ML inference every ~800ms if model is ready and not already processing
+    if (
+      this.modelReady &&
+      !this._mlProcessing &&
+      now - this._mlLastUpdate > 800 &&
+      rms > 0.005
+    ) {
+      this.runMLChordDetection();
     }
 
-    this.analyser.getFloatFrequencyData(this.freqBuf);
-    const sampleRate = this.audioCtx.sampleRate;
-    const binCount = this.analyser.frequencyBinCount;
-    const rms = this.computeRMS();
+    return {
+      chroma: this._mlChroma,
+      activePitchClasses: this._mlMidis.map(m => midiToPitchClass(m)),
+      activeMidis: this._mlMidis,
+      dominantPitchClass: this._mlMidis.length > 0 ? midiToPitchClass(this._mlMidis[0]) : 0,
+      rms,
+    };
+  }
 
-    const chroma = new Array(12).fill(0);
+  private async runMLChordDetection(): Promise<void> {
+    if (!this.basicPitchModel || !this.audioRingBuffer || !this.audioCtx) return;
+    this._mlProcessing = true;
 
-    for (let i = 1; i < binCount; i++) {
-      const freq = (i * sampleRate) / FFT_SIZE;
-      if (freq < MIN_FREQ || freq > MAX_FREQ) continue;
-
-      const db = this.freqBuf[i];
-      if (db < -65) continue;
-
-      // Convert dB to power (squared amplitude) for better dynamic range
-      const power = Math.pow(10, db / 10);
-      const midi = freqToNearestMidi(freq);
-      const pc = midiToPitchClass(midi);
-
-      // Only count if close to a note center (within 40 cents)
-      const freqExpected = midiToFreq(midi);
-      const centsDiff = Math.abs(1200 * Math.log2(freq / freqExpected));
-      if (centsDiff < 40) {
-        // Weight by 1/harmonic_number to favor fundamentals over overtones
-        const harmonicWeight = MIN_FREQ / Math.max(freq, MIN_FREQ);
-        chroma[pc] += power * (1 + harmonicWeight);
+    try {
+      // Extract audio from ring buffer (linearized)
+      const ring = this.audioRingBuffer;
+      const len = ring.length;
+      const linear = new Float32Array(len);
+      for (let i = 0; i < len; i++) {
+        linear[i] = ring[(this.ringBufferWritePos + i) % len];
       }
-    }
 
-    // Normalize
-    const maxEnergy = Math.max(...chroma);
-    if (maxEnergy > 0) {
-      for (let i = 0; i < 12; i++) {
-        chroma[i] /= maxEnergy;
+      // Downsample to 22050Hz (Basic Pitch requirement)
+      const resampled = downsample(linear, this.audioCtx.sampleRate, 22050);
+
+      // Run model
+      const allFrames: number[][] = [];
+      const allOnsets: number[][] = [];
+
+      await this.basicPitchModel.evaluateModel(
+        resampled,
+        (frames, onsets) => {
+          allFrames.push(...frames);
+          allOnsets.push(...onsets);
+        },
+        () => {} // progress callback
+      );
+
+      if (allFrames.length === 0) {
+        this._mlMidis = [];
+        this._mlChroma = new Array(12).fill(0);
+        this._mlLastUpdate = Date.now();
+        this._mlProcessing = false;
+        return;
       }
+
+      // Use the last few frames (most recent audio) to find currently-playing notes
+      const { outputToNotesPoly } = await import('@spotify/basic-pitch');
+      const recentFrames = allFrames.slice(-30); // Last ~0.35s
+      const recentOnsets = allOnsets.slice(-30);
+      const notes = outputToNotesPoly(
+        recentFrames,
+        recentOnsets,
+        0.4,  // onset threshold
+        0.25, // frame threshold
+        2,    // min note length (shorter for real-time)
+        true, // infer onsets
+        null, // max freq
+        null, // min freq
+        false // no melodia trick for real-time
+      );
+
+      // Extract unique MIDI notes, sorted by amplitude
+      const midiMap = new Map<number, number>();
+      for (const note of notes) {
+        const existing = midiMap.get(note.pitchMidi) ?? 0;
+        midiMap.set(note.pitchMidi, Math.max(existing, note.amplitude));
+      }
+
+      // Also check raw frame activations for currently-sounding notes
+      if (allFrames.length > 0) {
+        const lastFrame = allFrames[allFrames.length - 1];
+        for (let i = 0; i < lastFrame.length; i++) {
+          if (lastFrame[i] > 0.3) {
+            const midi = i + 21; // MIDI offset
+            const existing = midiMap.get(midi) ?? 0;
+            midiMap.set(midi, Math.max(existing, lastFrame[i]));
+          }
+        }
+      }
+
+      const sortedMidis = Array.from(midiMap.entries())
+        .sort((a, b) => b[1] - a[1])
+        .map(([midi]) => midi)
+        .slice(0, 6); // Max 6 notes
+
+      this._mlMidis = sortedMidis;
+
+      // Build chromagram from detected notes
+      const chroma = new Array(12).fill(0);
+      for (const [midi, amp] of midiMap.entries()) {
+        chroma[midiToPitchClass(midi)] += amp;
+      }
+      const maxC = Math.max(...chroma);
+      if (maxC > 0) {
+        for (let i = 0; i < 12; i++) chroma[i] /= maxC;
+      }
+      this._mlChroma = chroma;
+
+    } catch (err) {
+      console.warn('ML chord detection error:', err);
     }
 
-    const threshold = 0.25;
-    const activePitchClasses = chroma
-      .map((e, i) => ({ energy: e, pc: i }))
-      .filter(x => x.energy > threshold)
-      .sort((a, b) => b.energy - a.energy)
-      .map(x => x.pc);
-
-    const dominantPitchClass = activePitchClasses[0] ?? 0;
-
-    return { chroma, activePitchClasses, dominantPitchClass, rms };
+    this._mlLastUpdate = Date.now();
+    this._mlProcessing = false;
   }
 }
