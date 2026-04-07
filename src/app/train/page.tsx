@@ -6,6 +6,13 @@ import { getAccuracy } from '@/lib/progress/store';
 
 const EXERCISES = [
   {
+    href: '/train/pitch',
+    title: 'Perfect Pitch',
+    desc: 'Identify notes with no reference — pure ear',
+    color: 'coral',
+    icon: '?',
+  },
+  {
     href: '/train/intervals',
     title: 'Intervals',
     desc: 'Identify the distance between two notes',
