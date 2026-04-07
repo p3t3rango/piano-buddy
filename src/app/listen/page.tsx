@@ -2,56 +2,154 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import PianoKeyboard from '@/components/PianoKeyboard';
-import { PitchDetector, type PitchResult, type ChromaResult } from '@/lib/audio/pitchDetection';
+import { PitchDetector } from '@/lib/audio/pitchDetection';
 import { detectChordFromChroma, formatChord, formatChordFull, type DetectedChord } from '@/lib/music/chords';
 import { getIntervalName } from '@/lib/music/intervals';
 import { unlockAudio } from '@/lib/audio/synth';
-import { midiToNoteName, midiToPitchClass, pitchClassName, freqToCentsOff, NOTE_NAMES, semitoneDistance } from '@/lib/music/theory';
+import { midiToNoteName, pitchClassName, freqToCentsOff, NOTE_NAMES } from '@/lib/music/theory';
+
+// Stable display state — updated via refs, flushed to React on a throttle
+interface DisplayState {
+  noteName: string;
+  frequency: number;
+  centsOff: number;
+  midi: number;
+  hasNote: boolean;
+  chord: DetectedChord | null;
+  chordLabel: string;
+  chordFull: string;
+  chordNotes: string;
+  intervalName: string;
+  intervalFrom: string;
+  intervalTo: string;
+  hasInterval: boolean;
+  volume: number;
+  chroma: number[];
+  activePCs: number[];
+}
+
+const EMPTY_CHROMA = new Array(12).fill(0);
+
+function emptyDisplay(): DisplayState {
+  return {
+    noteName: '', frequency: 0, centsOff: 0, midi: 0, hasNote: false,
+    chord: null, chordLabel: '', chordFull: '', chordNotes: '',
+    intervalName: '', intervalFrom: '', intervalTo: '', hasInterval: false,
+    volume: 0, chroma: EMPTY_CHROMA, activePCs: [],
+  };
+}
 
 export default function ListenPage() {
   const [isListening, setIsListening] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [currentPitch, setCurrentPitch] = useState<PitchResult | null>(null);
-  const [currentChroma, setCurrentChroma] = useState<ChromaResult | null>(null);
-  const [detectedChord, setDetectedChord] = useState<DetectedChord | null>(null);
-  const [noteHistory, setNoteHistory] = useState<number[]>([]); // Last few MIDI notes for interval detection
-  const [volume, setVolume] = useState(0);
+  const [display, setDisplay] = useState<DisplayState>(emptyDisplay);
+
   const detectorRef = useRef<PitchDetector | null>(null);
   const rafRef = useRef<number>(0);
-  const lastMidiRef = useRef<number>(-1);
-  const lastMidiTimeRef = useRef<number>(0);
+  const displayRef = useRef<DisplayState>(emptyDisplay());
+
+  // Hold timers — keep values visible for a minimum duration
+  const noteHoldUntil = useRef(0);
+  const chordHoldUntil = useRef(0);
+  const lastFlush = useRef(0);
+
+  // Note history for intervals (stored in ref to avoid state churn)
+  const noteHistory = useRef<{ midi: number; time: number }[]>([]);
+
+  // Smoothed chroma (exponential moving average)
+  const smoothChroma = useRef<number[]>(new Array(12).fill(0));
+
+  const HOLD_MS = 800;      // Keep detected values visible for 800ms minimum
+  const FLUSH_MS = 120;     // Only update React state every 120ms
+  const SMOOTH_FACTOR = 0.3; // Chroma smoothing (0 = full smooth, 1 = no smooth)
 
   const analyze = useCallback(() => {
     if (!detectorRef.current?.isRunning()) return;
 
     const detector = detectorRef.current;
+    const now = Date.now();
+    const d = displayRef.current;
+
+    // Volume (always update ref, cheap)
     const rms = detector.getRMS();
-    setVolume(Math.min(rms * 10, 1));
+    d.volume = Math.min(rms * 10, 1);
 
-    // Single pitch detection
+    // Pitch detection
     const pitch = detector.detectPitch();
-    setCurrentPitch(pitch);
+    if (pitch && pitch.confidence > 0.4) {
+      d.hasNote = true;
+      d.noteName = midiToNoteName(pitch.midi);
+      d.frequency = pitch.frequency;
+      d.centsOff = freqToCentsOff(pitch.frequency);
+      d.midi = pitch.midi;
+      noteHoldUntil.current = now + HOLD_MS;
 
-    // Chromagram for chord detection
-    const chroma = detector.getChroma();
-    setCurrentChroma(chroma);
+      // Track for interval detection
+      const hist = noteHistory.current;
+      const lastEntry = hist[hist.length - 1];
+      if (!lastEntry || pitch.midi !== lastEntry.midi || now - lastEntry.time > 400) {
+        hist.push({ midi: pitch.midi, time: now });
+        if (hist.length > 5) hist.shift();
+      }
 
-    if (chroma.activePitchClasses.length >= 2) {
-      const chord = detectChordFromChroma(chroma.chroma);
-      setDetectedChord(chord);
-    } else if (chroma.rms < 0.01) {
-      setDetectedChord(null);
+      // Calculate interval from last 2 distinct notes (within 5 seconds)
+      const recent = hist.filter(h => now - h.time < 5000);
+      if (recent.length >= 2) {
+        const prev = recent[recent.length - 2];
+        const curr = recent[recent.length - 1];
+        const semitones = Math.abs(curr.midi - prev.midi);
+        if (semitones > 0 && semitones <= 12) {
+          d.hasInterval = true;
+          d.intervalName = getIntervalName(semitones);
+          d.intervalFrom = midiToNoteName(prev.midi);
+          d.intervalTo = midiToNoteName(curr.midi);
+        }
+      }
+    } else if (now > noteHoldUntil.current) {
+      d.hasNote = false;
     }
 
-    // Track note history for interval detection
-    if (pitch && pitch.confidence > 0.5) {
-      const now = Date.now();
-      if (pitch.midi !== lastMidiRef.current || now - lastMidiTimeRef.current > 500) {
-        lastMidiRef.current = pitch.midi;
-        lastMidiTimeRef.current = now;
-        setNoteHistory(prev => [...prev.slice(-4), pitch.midi]);
+    // Chromagram (smoothed)
+    const rawChroma = detector.getChroma();
+    const sc = smoothChroma.current;
+    for (let i = 0; i < 12; i++) {
+      sc[i] = sc[i] * (1 - SMOOTH_FACTOR) + rawChroma.chroma[i] * SMOOTH_FACTOR;
+    }
+    d.chroma = [...sc];
+
+    // Active pitch classes from smoothed chroma
+    const maxE = Math.max(...sc);
+    if (maxE > 0.01) {
+      d.activePCs = sc
+        .map((e, i) => ({ e: e / maxE, i }))
+        .filter(x => x.e > 0.3)
+        .sort((a, b) => b.e - a.e)
+        .map(x => x.i);
+    } else {
+      d.activePCs = [];
+    }
+
+    // Chord detection (from smoothed chroma)
+    if (d.activePCs.length >= 2 && maxE > 0.01) {
+      const chord = detectChordFromChroma(sc.map(v => v / maxE));
+      if (chord && chord.confidence > 0.65) {
+        d.chord = chord;
+        d.chordLabel = formatChord(chord);
+        d.chordFull = formatChordFull(chord);
+        d.chordNotes = chord.notes.map(pc => pitchClassName(pc)).join(' - ');
+        chordHoldUntil.current = now + HOLD_MS;
+      } else if (now > chordHoldUntil.current) {
+        d.chord = null;
       }
+    } else if (now > chordHoldUntil.current) {
+      d.chord = null;
+    }
+
+    // Throttled flush to React
+    if (now - lastFlush.current >= FLUSH_MS) {
+      lastFlush.current = now;
+      setDisplay({ ...d });
     }
 
     rafRef.current = requestAnimationFrame(analyze);
@@ -61,7 +159,6 @@ export default function ListenPage() {
     setError(null);
     setConnecting(true);
 
-    // Check if microphone API is available (requires HTTPS on non-localhost)
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       const isLocalhost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
       setConnecting(false);
@@ -81,6 +178,9 @@ export default function ListenPage() {
       await detectorRef.current.start();
       setConnecting(false);
       setIsListening(true);
+      displayRef.current = emptyDisplay();
+      smoothChroma.current = new Array(12).fill(0);
+      noteHistory.current = [];
       rafRef.current = requestAnimationFrame(analyze);
     } catch (err) {
       setConnecting(false);
@@ -99,10 +199,7 @@ export default function ListenPage() {
     detectorRef.current?.stop();
     cancelAnimationFrame(rafRef.current);
     setIsListening(false);
-    setCurrentPitch(null);
-    setCurrentChroma(null);
-    setDetectedChord(null);
-    setVolume(0);
+    setDisplay(emptyDisplay());
   };
 
   useEffect(() => {
@@ -112,20 +209,9 @@ export default function ListenPage() {
     };
   }, []);
 
-  // Determine active notes for keyboard display
-  const activePitchClasses = currentChroma?.activePitchClasses ?? [];
-  const singleNote = currentPitch?.midi;
-  const centsOff = currentPitch ? freqToCentsOff(currentPitch.frequency) : 0;
-
-  // Calculate interval from last two distinct notes
-  const lastTwoNotes = noteHistory.slice(-2);
-  const currentInterval = lastTwoNotes.length === 2
-    ? Math.abs(lastTwoNotes[1] - lastTwoNotes[0])
-    : null;
-
   // Volume bars
   const volumeBars = 8;
-  const activeVolumeBars = Math.round(volume * volumeBars);
+  const activeVolumeBars = Math.round(display.volume * volumeBars);
 
   return (
     <div className="flex flex-col items-center flex-1 px-4 py-4 gap-4">
@@ -134,7 +220,7 @@ export default function ListenPage() {
       </h2>
 
       {/* Main display screen */}
-      <div className="crt-screen w-full max-w-lg p-6 flex flex-col items-center gap-4 min-h-[200px]">
+      <div className="crt-screen w-full max-w-lg p-6 flex flex-col items-center gap-4 min-h-[280px]">
         {!isListening ? (
           <div className="flex flex-col items-center gap-6 py-8">
             <p className="text-[9px] text-cream-dim text-center" style={{ fontFamily: 'var(--font-pixel)' }}>
@@ -166,54 +252,46 @@ export default function ListenPage() {
               ))}
             </div>
 
-            {/* Detected note */}
-            {singleNote ? (
-              <div className="text-center">
-                <p className="text-3xl text-pink glow-text" style={{ fontFamily: 'var(--font-pixel)' }}>
-                  {midiToNoteName(singleNote)}
-                </p>
+            {/* Detected note — always rendered, visibility toggled via opacity */}
+            <div className="text-center transition-opacity duration-200" style={{ opacity: display.hasNote ? 1 : 0.2, minHeight: 60 }}>
+              <p className="text-3xl text-pink glow-text" style={{ fontFamily: 'var(--font-pixel)' }}>
+                {display.hasNote ? display.noteName : '---'}
+              </p>
+              {display.hasNote && (
                 <p className="text-[8px] text-cream-dim mt-1" style={{ fontFamily: 'var(--font-pixel)' }}>
-                  {currentPitch?.frequency.toFixed(1)} Hz
+                  {display.frequency.toFixed(1)} Hz
                   {' '}
-                  <span className={Math.abs(centsOff) < 10 ? 'text-green' : 'text-coral'}>
-                    {centsOff > 0 ? '+' : ''}{centsOff.toFixed(0)}¢
+                  <span className={Math.abs(display.centsOff) < 10 ? 'text-green' : 'text-coral'}>
+                    {display.centsOff > 0 ? '+' : ''}{display.centsOff.toFixed(0)}¢
                   </span>
                 </p>
-              </div>
-            ) : (
-              <p className="text-[10px] text-cream-dim animate-pulse-glow" style={{ fontFamily: 'var(--font-pixel)' }}>
-                Play something...
+              )}
+            </div>
+
+            {/* Detected chord — always rendered, visibility toggled */}
+            <div className="text-center transition-opacity duration-300" style={{ opacity: display.chord ? 1 : 0, minHeight: 50 }}>
+              <p className="text-[8px] text-cream-dim" style={{ fontFamily: 'var(--font-pixel)' }}>CHORD</p>
+              <p className="text-xl text-amber glow-text" style={{ fontFamily: 'var(--font-pixel)' }}>
+                {display.chordLabel || '---'}
               </p>
-            )}
+              <p className="text-[8px] text-cream-dim" style={{ fontFamily: 'var(--font-pixel)' }}>
+                {display.chordFull}
+              </p>
+              <p className="text-[7px] text-teal mt-1" style={{ fontFamily: 'var(--font-pixel)' }}>
+                {display.chordNotes}
+              </p>
+            </div>
 
-            {/* Detected chord */}
-            {detectedChord && (
-              <div className="text-center mt-2">
-                <p className="text-[8px] text-cream-dim" style={{ fontFamily: 'var(--font-pixel)' }}>CHORD</p>
-                <p className="text-xl text-amber glow-text" style={{ fontFamily: 'var(--font-pixel)' }}>
-                  {formatChord(detectedChord)}
-                </p>
-                <p className="text-[8px] text-cream-dim" style={{ fontFamily: 'var(--font-pixel)' }}>
-                  {formatChordFull(detectedChord)}
-                </p>
-                <p className="text-[7px] text-teal mt-1" style={{ fontFamily: 'var(--font-pixel)' }}>
-                  {detectedChord.notes.map(pc => pitchClassName(pc)).join(' - ')}
-                </p>
-              </div>
-            )}
-
-            {/* Detected interval */}
-            {currentInterval !== null && currentInterval > 0 && currentInterval <= 12 && (
-              <div className="text-center mt-2">
-                <p className="text-[8px] text-cream-dim" style={{ fontFamily: 'var(--font-pixel)' }}>INTERVAL</p>
-                <p className="text-sm text-teal" style={{ fontFamily: 'var(--font-pixel)' }}>
-                  {getIntervalName(currentInterval)}
-                </p>
-                <p className="text-[7px] text-cream-dim" style={{ fontFamily: 'var(--font-pixel)' }}>
-                  {midiToNoteName(lastTwoNotes[0])} → {midiToNoteName(lastTwoNotes[1])}
-                </p>
-              </div>
-            )}
+            {/* Detected interval — always rendered */}
+            <div className="text-center transition-opacity duration-200" style={{ opacity: display.hasInterval ? 1 : 0, minHeight: 36 }}>
+              <p className="text-[8px] text-cream-dim" style={{ fontFamily: 'var(--font-pixel)' }}>INTERVAL</p>
+              <p className="text-sm text-teal" style={{ fontFamily: 'var(--font-pixel)' }}>
+                {display.intervalName || '---'}
+              </p>
+              <p className="text-[7px] text-cream-dim" style={{ fontFamily: 'var(--font-pixel)' }}>
+                {display.intervalFrom} → {display.intervalTo}
+              </p>
+            </div>
 
             {/* Stop button */}
             <button
@@ -237,13 +315,13 @@ export default function ListenPage() {
         <PianoKeyboard
           startMidi={48}
           endMidi={72}
-          activeNotes={activePitchClasses}
+          activeNotes={display.activePCs}
           activeMode="pitchClass"
         />
       </div>
 
       {/* Chromagram visualization */}
-      {isListening && currentChroma && (
+      {isListening && (
         <div className="w-full max-w-lg">
           <p className="text-[7px] text-cream-dim mb-2 text-center" style={{ fontFamily: 'var(--font-pixel)' }}>
             PITCH ENERGY
@@ -254,9 +332,9 @@ export default function ListenPage() {
                 <div
                   className="w-4 rounded-t"
                   style={{
-                    height: `${(currentChroma.chroma[i] ?? 0) * 50}px`,
-                    background: activePitchClasses.includes(i) ? '#ff6e6c' : '#541388',
-                    transition: 'height 0.1s',
+                    height: `${(display.chroma[i] ?? 0) * 50}px`,
+                    background: display.activePCs.includes(i) ? '#ff6e6c' : '#541388',
+                    transition: 'height 0.15s ease-out',
                     minHeight: '2px',
                   }}
                 />
