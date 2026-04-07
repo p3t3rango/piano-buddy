@@ -3,7 +3,7 @@
 // 2. Spotify Basic Pitch — ML polyphonic chord detection (buffered)
 
 import { PitchDetector as PitchyDetector } from 'pitchy';
-import { freqToNearestMidi, midiToPitchClass, midiToFreq } from '../music/theory';
+import { freqToNearestMidi, midiToPitchClass, midiToFreq, midiToNoteName } from '../music/theory';
 
 export interface PitchResult {
   frequency: number;
@@ -229,8 +229,8 @@ export class PitchDetector {
       }
     }
 
-    // Trigger ML inference every ~800ms — require significant signal
-    if (this.modelReady && !this._mlProcessing && now - this._mlLastUpdate > 800 && rms > 0.025) {
+    // Trigger ML inference every ~800ms — require some signal (but not too much)
+    if (this.modelReady && !this._mlProcessing && now - this._mlLastUpdate > 800 && rms > 0.01) {
       this.runMLChordDetection();
     }
 
@@ -346,29 +346,30 @@ export class PitchDetector {
         return;
       }
 
-      // Use the last few frames (most recent audio) to find currently-playing notes
+      // Run note detection on ALL frames (not just recent — the model needs context)
       const { outputToNotesPoly } = await import('@spotify/basic-pitch');
-      const recentFrames = allFrames.slice(-30); // Last ~0.35s
-      const recentOnsets = allOnsets.slice(-30);
       const notes = outputToNotesPoly(
-        recentFrames,
-        recentOnsets,
-        0.5,  // onset threshold (higher = fewer false positives)
-        0.4,  // frame threshold (higher = fewer false positives)
-        3,    // min note length
+        allFrames,
+        allOnsets,
+        0.3,  // onset threshold (lower = more sensitive)
+        0.2,  // frame threshold (lower = more sensitive)
+        2,    // min note length (shorter for real-time)
         true, // infer onsets
         2100, // max freq (C7)
         65,   // min freq (C2)
-        false // no melodia trick for real-time
+        true  // melodia trick — helps find sustained notes
       );
 
-      // Extract unique MIDI notes, filtered to reasonable piano range
+      console.log(`[ML] frames=${allFrames.length}, raw notes=${notes.length}`,
+        notes.map(n => `M${n.pitchMidi}(${n.amplitude.toFixed(2)})`).join(' '));
+
+      // Extract unique MIDI notes from the most recent notes
       const MIN_MIDI = 36; // C2
       const MAX_MIDI = 96; // C7
       const midiMap = new Map<number, number>();
       for (const note of notes) {
         if (note.pitchMidi < MIN_MIDI || note.pitchMidi > MAX_MIDI) continue;
-        if (note.amplitude < 0.3) continue; // Require decent amplitude
+        if (note.amplitude < 0.1) continue; // Lower threshold — ML already filtered noise
         const existing = midiMap.get(note.pitchMidi) ?? 0;
         midiMap.set(note.pitchMidi, Math.max(existing, note.amplitude));
       }
@@ -377,6 +378,8 @@ export class PitchDetector {
         .sort((a, b) => b[1] - a[1])
         .map(([midi]) => midi)
         .slice(0, 6);
+
+      console.log(`[ML] detected: ${sortedMidis.map(m => `${midiToNoteName(m)}`).join(' ')}`);
 
       this._mlMidis = sortedMidis;
 

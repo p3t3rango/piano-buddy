@@ -147,8 +147,8 @@ export default function ListenPage() {
         d.activePCs = [];
       }
 
-      if (d.activePCs.length >= 3 && maxE > 0.01) {
-        // Only attempt chord detection with 3+ pitch classes to reduce false positives
+      if (d.activePCs.length >= 2 && maxE > 0.01) {
+        // Attempt chord detection from FFT fallback
         const chord = detectChordFromChroma(sc.map(v => v / maxE));
         if (chord && chord.confidence > 0.75) {
           d.chord = chord;
