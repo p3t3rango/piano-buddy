@@ -221,13 +221,21 @@ export class PitchDetector {
     const rms = this.getRMS();
     const now = Date.now();
 
-    // Trigger ML inference every ~800ms if model is ready
-    if (this.modelReady && !this._mlProcessing && now - this._mlLastUpdate > 800 && rms > 0.005) {
+    // Clear results when signal is too quiet (silence = no chord)
+    if (rms < 0.015) {
+      if (this._mlMidis.length > 0) {
+        this._mlMidis = [];
+        this._mlChroma = new Array(12).fill(0);
+      }
+    }
+
+    // Trigger ML inference every ~800ms — require significant signal
+    if (this.modelReady && !this._mlProcessing && now - this._mlLastUpdate > 800 && rms > 0.025) {
       this.runMLChordDetection();
     }
 
-    // If ML has results, use them
-    if (this._mlMidis.length > 0 && now - this._mlLastUpdate < 2000) {
+    // If ML has results and signal is present, use them
+    if (this._mlMidis.length > 0 && now - this._mlLastUpdate < 1500 && rms > 0.015) {
       return {
         chroma: this._mlChroma,
         activePitchClasses: [...new Set(this._mlMidis.map(m => midiToPitchClass(m)))],
@@ -248,7 +256,7 @@ export class PitchDetector {
       const freq = (i * sampleRate) / PitchDetector.FFT_SIZE;
       if (freq < 65 || freq > 2100) continue;
       const db = this.freqBuf[i];
-      if (db < -55) continue;
+      if (db < -45) continue; // Higher threshold to ignore noise
       // Local peak check
       if (db > this.freqBuf[i - 1] && db > this.freqBuf[i + 1]) {
         peaks.push({ freq, power: Math.pow(10, db / 10), bin: i });
@@ -345,38 +353,30 @@ export class PitchDetector {
       const notes = outputToNotesPoly(
         recentFrames,
         recentOnsets,
-        0.4,  // onset threshold
-        0.25, // frame threshold
-        2,    // min note length (shorter for real-time)
+        0.5,  // onset threshold (higher = fewer false positives)
+        0.4,  // frame threshold (higher = fewer false positives)
+        3,    // min note length
         true, // infer onsets
-        null, // max freq
-        null, // min freq
+        2100, // max freq (C7)
+        65,   // min freq (C2)
         false // no melodia trick for real-time
       );
 
-      // Extract unique MIDI notes, sorted by amplitude
+      // Extract unique MIDI notes, filtered to reasonable piano range
+      const MIN_MIDI = 36; // C2
+      const MAX_MIDI = 96; // C7
       const midiMap = new Map<number, number>();
       for (const note of notes) {
+        if (note.pitchMidi < MIN_MIDI || note.pitchMidi > MAX_MIDI) continue;
+        if (note.amplitude < 0.3) continue; // Require decent amplitude
         const existing = midiMap.get(note.pitchMidi) ?? 0;
         midiMap.set(note.pitchMidi, Math.max(existing, note.amplitude));
-      }
-
-      // Also check raw frame activations for currently-sounding notes
-      if (allFrames.length > 0) {
-        const lastFrame = allFrames[allFrames.length - 1];
-        for (let i = 0; i < lastFrame.length; i++) {
-          if (lastFrame[i] > 0.3) {
-            const midi = i + 21; // MIDI offset
-            const existing = midiMap.get(midi) ?? 0;
-            midiMap.set(midi, Math.max(existing, lastFrame[i]));
-          }
-        }
       }
 
       const sortedMidis = Array.from(midiMap.entries())
         .sort((a, b) => b[1] - a[1])
         .map(([midi]) => midi)
-        .slice(0, 6); // Max 6 notes
+        .slice(0, 6);
 
       this._mlMidis = sortedMidis;
 
