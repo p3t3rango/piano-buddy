@@ -6,7 +6,7 @@ import { PitchDetector } from '@/lib/audio/pitchDetection';
 import { detectChordFromChroma, formatChord, formatChordFull, type DetectedChord } from '@/lib/music/chords';
 import { getIntervalName } from '@/lib/music/intervals';
 import { unlockAudio } from '@/lib/audio/synth';
-import { midiToNoteName, midiToPitchClass, pitchClassName, freqToCentsOff, NOTE_NAMES } from '@/lib/music/theory';
+import { midiToNoteName, pitchClassName, freqToCentsOff, NOTE_NAMES } from '@/lib/music/theory';
 
 // Stable display state — updated via refs, flushed to React on a throttle
 interface DisplayState {
@@ -124,7 +124,6 @@ export default function ListenPage() {
 
       // Build chord from ML-detected notes
       if (rawChroma.activeMidis.length >= 2) {
-        const pcs = rawChroma.activeMidis.map(m => midiToPitchClass(m));
         const chord = detectChordFromChroma(rawChroma.chroma);
         if (chord) {
           d.chord = chord;

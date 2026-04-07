@@ -3,7 +3,7 @@
 // 2. Spotify Basic Pitch — ML polyphonic chord detection (buffered)
 
 import { PitchDetector as PitchyDetector } from 'pitchy';
-import { freqToNearestMidi, midiToPitchClass, freqToCentsOff } from '../music/theory';
+import { freqToNearestMidi, midiToPitchClass, midiToFreq } from '../music/theory';
 
 export interface PitchResult {
   frequency: number;
@@ -37,6 +37,7 @@ export class PitchDetector {
   private source: MediaStreamAudioSourceNode | null = null;
   private stream: MediaStream | null = null;
   private timeBuf: Float32Array<ArrayBuffer> | null = null;
+  private freqBuf: Float32Array<ArrayBuffer> | null = null;
   private running = false;
 
   // Pitchy detector for single notes
@@ -70,6 +71,7 @@ export class PitchDetector {
     this.analyser.fftSize = PitchDetector.FFT_SIZE;
     this.analyser.smoothingTimeConstant = 0.8;
     this.timeBuf = new Float32Array(PitchDetector.FFT_SIZE);
+    this.freqBuf = new Float32Array(this.analyser.frequencyBinCount);
     this.pitchyDetector = PitchyDetector.forFloat32Array(PitchDetector.FFT_SIZE);
 
     // Ring buffer for ML model (stores last N seconds at mic sample rate)
@@ -93,6 +95,7 @@ export class PitchDetector {
       this.source.connect(this.analyser!);
 
       // Script processor to capture raw audio into ring buffer
+      // Connected to a silent gain node (NOT destination — that would cause feedback)
       this.scriptNode = this.audioCtx!.createScriptProcessor(4096, 1, 1);
       this.scriptNode.onaudioprocess = (e) => {
         const input = e.inputBuffer.getChannelData(0);
@@ -102,8 +105,11 @@ export class PitchDetector {
           this.ringBufferWritePos = (this.ringBufferWritePos + 1) % ring.length;
         }
       };
+      const silentGain = this.audioCtx!.createGain();
+      silentGain.gain.value = 0;
+      silentGain.connect(this.audioCtx!.destination);
       this.source.connect(this.scriptNode);
-      this.scriptNode.connect(this.audioCtx!.destination); // Required for scriptProcessor to work
+      this.scriptNode.connect(silentGain);
 
       if (this.audioCtx!.state === 'suspended') {
         await this.audioCtx!.resume();
@@ -122,12 +128,14 @@ export class PitchDetector {
     if (this.modelLoading || this.modelReady) return;
     this.modelLoading = true;
     try {
+      // Dynamic imports — these are heavy, loaded only when needed
+      await import('@tensorflow/tfjs');
       const { BasicPitch } = await import('@spotify/basic-pitch');
       this.basicPitchModel = new BasicPitch('/model/model.json');
       this.modelReady = true;
       console.log('Basic Pitch ML model loaded');
     } catch (err) {
-      console.warn('Could not load Basic Pitch model, using fallback:', err);
+      console.warn('Could not load Basic Pitch model, chord detection will use fallback:', err);
     }
     this.modelLoading = false;
   }
@@ -168,54 +176,99 @@ export class PitchDetector {
       return null;
     }
 
-    this.analyser.getFloatTimeDomainData(this.timeBuf);
+    try {
+      this.analyser.getFloatTimeDomainData(this.timeBuf);
 
-    // Check signal level
-    let sum = 0;
-    for (let i = 0; i < this.timeBuf.length; i++) {
-      sum += this.timeBuf[i] * this.timeBuf[i];
+      // Check signal level
+      let sum = 0;
+      for (let i = 0; i < this.timeBuf.length; i++) {
+        sum += this.timeBuf[i] * this.timeBuf[i];
+      }
+      const rms = Math.sqrt(sum / this.timeBuf.length);
+      if (rms < 0.008) return null;
+
+      const [pitch, clarity] = this.pitchyDetector.findPitch(
+        this.timeBuf,
+        this.audioCtx.sampleRate
+      );
+
+      // Pitchy clarity threshold — higher = more confident
+      if (clarity < 0.85 || pitch < 60 || pitch > 2100) return null;
+
+      const midi = freqToNearestMidi(pitch);
+
+      return {
+        frequency: pitch,
+        midi,
+        confidence: clarity,
+      };
+    } catch (err) {
+      console.warn('Pitch detection error:', err);
+      return null;
     }
-    const rms = Math.sqrt(sum / this.timeBuf.length);
-    if (rms < 0.008) return null;
-
-    const [pitch, clarity] = this.pitchyDetector.findPitch(
-      this.timeBuf,
-      this.audioCtx.sampleRate
-    );
-
-    // Pitchy clarity threshold — higher = more confident
-    if (clarity < 0.85 || pitch < 60 || pitch > 2100) return null;
-
-    const midi = freqToNearestMidi(pitch);
-
-    return {
-      frequency: pitch,
-      midi,
-      confidence: clarity,
-    };
   }
 
-  // ── Chord detection via ML (Spotify Basic Pitch) ──
-  // Called periodically (not every frame) — returns cached results between updates
+  // ── Chord detection — ML when available, FFT chromagram as fallback ──
   getChroma(): ChromaResult {
+    if (!this.analyser || !this.freqBuf || !this.audioCtx) {
+      return { chroma: new Array(12).fill(0), activePitchClasses: [], activeMidis: [], dominantPitchClass: 0, rms: 0 };
+    }
+
     const rms = this.getRMS();
     const now = Date.now();
 
-    // Trigger ML inference every ~800ms if model is ready and not already processing
-    if (
-      this.modelReady &&
-      !this._mlProcessing &&
-      now - this._mlLastUpdate > 800 &&
-      rms > 0.005
-    ) {
+    // Trigger ML inference every ~800ms if model is ready
+    if (this.modelReady && !this._mlProcessing && now - this._mlLastUpdate > 800 && rms > 0.005) {
       this.runMLChordDetection();
     }
 
+    // If ML has results, use them
+    if (this._mlMidis.length > 0 && now - this._mlLastUpdate < 2000) {
+      return {
+        chroma: this._mlChroma,
+        activePitchClasses: [...new Set(this._mlMidis.map(m => midiToPitchClass(m)))],
+        activeMidis: this._mlMidis,
+        dominantPitchClass: midiToPitchClass(this._mlMidis[0]),
+        rms,
+      };
+    }
+
+    // Fallback: FFT-based chromagram
+    this.analyser.getFloatFrequencyData(this.freqBuf);
+    const sampleRate = this.audioCtx.sampleRate;
+    const chroma = new Array(12).fill(0);
+
+    for (let i = 1; i < this.freqBuf.length; i++) {
+      const freq = (i * sampleRate) / PitchDetector.FFT_SIZE;
+      if (freq < 65 || freq > 2100) continue;
+      const db = this.freqBuf[i];
+      if (db < -65) continue;
+      const power = Math.pow(10, db / 10);
+      const midi = freqToNearestMidi(freq);
+      const pc = midiToPitchClass(midi);
+      const freqExpected = midiToFreq(midi);
+      const centsDiff = Math.abs(1200 * Math.log2(freq / freqExpected));
+      if (centsDiff < 40) {
+        chroma[pc] += power;
+      }
+    }
+
+    const maxEnergy = Math.max(...chroma);
+    if (maxEnergy > 0) {
+      for (let i = 0; i < 12; i++) chroma[i] /= maxEnergy;
+    }
+
+    const activePitchClasses = chroma
+      .map((e, i) => ({ e, i }))
+      .filter(x => x.e > 0.25)
+      .sort((a, b) => b.e - a.e)
+      .map(x => x.i);
+
     return {
-      chroma: this._mlChroma,
-      activePitchClasses: this._mlMidis.map(m => midiToPitchClass(m)),
-      activeMidis: this._mlMidis,
-      dominantPitchClass: this._mlMidis.length > 0 ? midiToPitchClass(this._mlMidis[0]) : 0,
+      chroma,
+      activePitchClasses,
+      activeMidis: [],
+      dominantPitchClass: activePitchClasses[0] ?? 0,
       rms,
     };
   }
