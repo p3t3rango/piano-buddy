@@ -57,12 +57,11 @@ export default function ListenPage() {
   // Note history for intervals (stored in ref to avoid state churn)
   const noteHistory = useRef<{ midi: number; time: number }[]>([]);
 
-  // Chord detection: track all detected pitches in a sliding window
-  const chordWindow = useRef<{ midi: number; time: number }[]>([]);
-  const CHORD_WINDOW_MS = 1200; // Collect notes within this window to form a chord
-
   // Smoothed chroma (exponential moving average)
   const smoothChroma = useRef<number[]>(new Array(12).fill(0));
+
+  // ML chord results (from PitchDetector.getChroma)
+  const lastMLChord = useRef<{ midis: number[]; time: number }>({ midis: [], time: 0 });
 
   const HOLD_MS = 800;      // Keep detected values visible for 800ms minimum
   const FLUSH_MS = 120;     // Only update React state every 120ms
@@ -78,7 +77,7 @@ export default function ListenPage() {
     const rms = detector.getRMS();
     d.volume = Math.min(rms * 10, 1);
 
-    // Pitch detection via Pitchy
+    // ── Single note: Pitchy (instant, monophonic) ──
     const pitch = detector.detectPitch();
     if (pitch && pitch.confidence > 0.5) {
       d.hasNote = true;
@@ -88,15 +87,13 @@ export default function ListenPage() {
       d.midi = pitch.midi;
       noteHoldUntil.current = now + HOLD_MS;
 
-      // Track for interval detection
+      // Interval tracking
       const hist = noteHistory.current;
       const lastEntry = hist[hist.length - 1];
       if (!lastEntry || pitch.midi !== lastEntry.midi || now - lastEntry.time > 400) {
         hist.push({ midi: pitch.midi, time: now });
         if (hist.length > 5) hist.shift();
       }
-
-      // Calculate interval from last 2 distinct notes (within 5 seconds)
       const recent = hist.filter(h => now - h.time < 5000);
       if (recent.length >= 2) {
         const prev = recent[recent.length - 2];
@@ -109,49 +106,40 @@ export default function ListenPage() {
           d.intervalTo = midiToNoteName(curr.midi);
         }
       }
-
-      // Add to chord window — collect all notes detected within a sliding window
-      const cw = chordWindow.current;
-      // Only add if this note isn't already in the window recently
-      const existingInWindow = cw.find(c => c.midi === pitch.midi && now - c.time < 300);
-      if (!existingInWindow) {
-        cw.push({ midi: pitch.midi, time: now });
-      }
     } else if (now > noteHoldUntil.current) {
       d.hasNote = false;
     }
 
-    // Clean old entries from chord window
-    chordWindow.current = chordWindow.current.filter(c => now - c.time < CHORD_WINDOW_MS);
-
-    // Build chord from notes in the window
-    const windowMidis = [...new Set(chordWindow.current.map(c => c.midi))];
-    // Build chromagram from window notes for keyboard display
+    // ── Chord: Basic Pitch ML (polyphonic, ~1s latency) ──
+    const mlResult = detector.getChroma();
     const sc = smoothChroma.current;
-    const windowChroma = new Array(12).fill(0);
-    for (const midi of windowMidis) {
-      windowChroma[midiToPitchClass(midi)] = 1;
-    }
+    // Smooth the chroma for keyboard display
     for (let i = 0; i < 12; i++) {
-      sc[i] = sc[i] * 0.7 + windowChroma[i] * 0.3;
+      sc[i] = sc[i] * 0.6 + mlResult.chroma[i] * 0.4;
     }
     d.chroma = [...sc];
-    d.activePCs = windowMidis.map(m => midiToPitchClass(m));
 
-    // Chord detection from collected notes
-    if (windowMidis.length >= 2) {
-      const chord = detectChordFromMidis(windowMidis);
+    if (mlResult.activeMidis.length >= 2) {
+      // ML detected multiple notes — this is a chord
+      lastMLChord.current = { midis: mlResult.activeMidis, time: now };
+      d.activePCs = mlResult.activePitchClasses;
+      const chord = detectChordFromMidis(mlResult.activeMidis);
       if (chord) {
         d.chord = chord;
         d.chordLabel = formatChord(chord);
         d.chordFull = formatChordFull(chord);
-        d.chordNotes = windowMidis.sort((a, b) => a - b).map(m => midiToNoteName(m)).join(' - ');
-        chordHoldUntil.current = now + HOLD_MS;
-      } else if (now > chordHoldUntil.current) {
-        d.chord = null;
+        d.chordNotes = mlResult.activeMidis.sort((a, b) => a - b).map(m => midiToNoteName(m)).join(' - ');
+        chordHoldUntil.current = now + 1500; // Hold chord longer (ML updates slowly)
       }
+    } else if (mlResult.activeMidis.length === 1) {
+      // ML detected single note — show on keyboard
+      d.activePCs = mlResult.activePitchClasses;
+    } else if (d.hasNote) {
+      // No ML results but Pitchy has a note — show that on keyboard
+      d.activePCs = [midiToPitchClass(d.midi)];
     } else if (now > chordHoldUntil.current) {
       d.chord = null;
+      d.activePCs = [];
     }
 
     // Throttled flush to React

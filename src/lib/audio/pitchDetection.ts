@@ -229,8 +229,8 @@ export class PitchDetector {
       }
     }
 
-    // Trigger ML inference every ~800ms — require some signal (but not too much)
-    if (this.modelReady && !this._mlProcessing && now - this._mlLastUpdate > 800 && rms > 0.01) {
+    // Trigger ML inference every ~700ms when there's signal
+    if (this.modelReady && !this._mlProcessing && now - this._mlLastUpdate > 700 && rms > 0.012) {
       this.runMLChordDetection();
     }
 
@@ -360,16 +360,14 @@ export class PitchDetector {
         true  // melodia trick — helps find sustained notes
       );
 
-      console.log(`[ML] frames=${allFrames.length}, raw notes=${notes.length}`,
-        notes.map(n => `M${n.pitchMidi}(${n.amplitude.toFixed(2)})`).join(' '));
-
-      // Extract unique MIDI notes from the most recent notes
+      // Extract MIDI notes — amplitude > 0.4 filters ambient noise (noise ≈ 0.2-0.3)
       const MIN_MIDI = 36; // C2
       const MAX_MIDI = 96; // C7
+      const AMP_THRESHOLD = 0.4;
       const midiMap = new Map<number, number>();
       for (const note of notes) {
         if (note.pitchMidi < MIN_MIDI || note.pitchMidi > MAX_MIDI) continue;
-        if (note.amplitude < 0.1) continue; // Lower threshold — ML already filtered noise
+        if (note.amplitude < AMP_THRESHOLD) continue;
         const existing = midiMap.get(note.pitchMidi) ?? 0;
         midiMap.set(note.pitchMidi, Math.max(existing, note.amplitude));
       }
@@ -379,7 +377,7 @@ export class PitchDetector {
         .map(([midi]) => midi)
         .slice(0, 6);
 
-      console.log(`[ML] detected: ${sortedMidis.map(m => `${midiToNoteName(m)}`).join(' ')}`);
+      console.log(`[ML] raw=${notes.length} filtered=${sortedMidis.length}: ${sortedMidis.map(m => midiToNoteName(m)).join(' ')}`);
 
       this._mlMidis = sortedMidis;
 
