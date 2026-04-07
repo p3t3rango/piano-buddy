@@ -96,29 +96,33 @@ export default function ListenPage() {
       noteHoldUntil.current = now + HOLD_MS;
 
       // Interval two-note state machine
+      // Only register a note if it's significantly different from the current state
+      // (±1 semitone tolerance to handle Pitchy fluctuations on a ringing note)
       intervalLastNoteTime.current = now;
       const iState = intervalState.current;
       if (iState === 'waiting_first') {
-        // Store the first note and advance state
         intervalFirstMidi.current = pitch.midi;
         intervalState.current = 'waiting_second';
       } else if (iState === 'waiting_second') {
         const firstMidi = intervalFirstMidi.current!;
-        if (pitch.midi !== firstMidi) {
-          // Second note is different — calculate and show interval
-          const semitones = Math.abs(pitch.midi - firstMidi);
-          if (semitones > 0 && semitones <= 24) {
-            d.hasInterval = true;
-            d.intervalName = getIntervalName(Math.min(semitones, 12));
-            d.intervalFrom = midiToNoteName(firstMidi);
-            d.intervalTo = midiToNoteName(pitch.midi);
-          }
-          intervalShowUntil.current = now + 2000;
+        const diff = Math.abs(pitch.midi - firstMidi);
+        // Require at least 2 semitones difference to count as a new note
+        // (1 semitone could be Pitchy fluctuation on the same note)
+        if (diff >= 2 && diff <= 24) {
+          d.hasInterval = true;
+          d.intervalName = getIntervalName(Math.min(diff, 12));
+          d.intervalFrom = midiToNoteName(firstMidi);
+          d.intervalTo = midiToNoteName(pitch.midi);
+          intervalShowUntil.current = now + 2500;
           intervalState.current = 'showing';
         }
-        // If same note held down, stay in waiting_second
       }
-      // In 'showing' state, keep displaying the interval (handled below)
+      // In 'showing' state: if a new note is detected, auto-start next interval pair
+      if (iState === 'showing' && now > intervalShowUntil.current - 500) {
+        // Near end of showing — if user plays another note, treat as new first note
+        intervalFirstMidi.current = pitch.midi;
+        // Don't transition yet — let the showing expire naturally
+      }
     } else if (now > noteHoldUntil.current) {
       d.hasNote = false;
     }

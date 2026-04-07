@@ -356,10 +356,10 @@ export class PitchDetector {
         true  // melodia trick
       );
 
-      // Collect notes with amplitude above threshold
+      // Collect notes — lower threshold to catch all chord tones
       const MIN_MIDI = 36;
       const MAX_MIDI = 96;
-      const AMP_THRESHOLD = 0.3;
+      const AMP_THRESHOLD = 0.2;
       const midiMap = new Map<number, number>();
       for (const note of notes) {
         if (note.pitchMidi < MIN_MIDI || note.pitchMidi > MAX_MIDI) continue;
@@ -391,7 +391,7 @@ export class PitchDetector {
       // Span check — discard if notes are scattered across > 2 octaves
       if (sortedMidis.length >= 2) {
         const span = Math.max(...sortedMidis) - Math.min(...sortedMidis);
-        if (span > 24) {
+        if (span > 19) { // Max ~octave+5th — real chords are compact, noise is scattered
           this.mlDebug = `SKIP span=${span}: ${sortedMidis.map(m => midiToNoteName(m)).join(' ')}`;
           this._mlMidis = [];
           this._mlChroma = new Array(12).fill(0);
@@ -401,9 +401,16 @@ export class PitchDetector {
         }
       }
 
+      // If more than 5 unique pitch classes detected, likely noise — keep only top 3 by amplitude
+      const uniquePCs = new Set(sortedMidis.map(m => m % 12));
+      if (uniquePCs.size > 5) {
+        sortedMidis = sortedMidis.slice(0, 3);
+      }
+
       // Debug display
       const debugParts = Array.from(midiMap.entries())
         .sort((a, b) => b[1] - a[1])
+        .slice(0, 6)
         .map(([midi, amp]) => `${midiToNoteName(midi)}(${amp.toFixed(2)})`);
       this.mlDebug = sortedMidis.length > 0
         ? debugParts.join(' ')
