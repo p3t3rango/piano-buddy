@@ -26,6 +26,7 @@ interface DisplayState {
   volume: number;
   chroma: number[];
   activePCs: number[];
+  mlReady: boolean;
 }
 
 const EMPTY_CHROMA = new Array(12).fill(0);
@@ -34,7 +35,7 @@ function emptyDisplay(): DisplayState {
   return {
     noteName: '', frequency: 0, centsOff: 0, midi: 0, hasNote: false,
     chord: null, chordLabel: '', chordFull: '', chordNotes: '',
-    intervalName: '', intervalFrom: '', intervalTo: '', hasInterval: false,
+    intervalName: '', intervalFrom: '', intervalTo: '', hasInterval: false, mlReady: false,
     volume: 0, chroma: EMPTY_CHROMA, activePCs: [],
   };
 }
@@ -71,9 +72,10 @@ export default function ListenPage() {
     const now = Date.now();
     const d = displayRef.current;
 
-    // Volume (always update ref, cheap)
+    // Volume and ML status
     const rms = detector.getRMS();
     d.volume = Math.min(rms * 10, 1);
+    d.mlReady = detector.isMLReady();
 
     // Pitch detection (YIN confidence: 0-1, higher = more periodic)
     const pitch = detector.detectPitch();
@@ -252,7 +254,15 @@ export default function ListenPage() {
           </div>
         ) : (
           <>
-            {/* Volume meter */}
+            {/* ML status + Volume meter */}
+            <div className="flex items-center gap-3 w-full justify-center">
+              <span
+                className={`text-[7px] ${display.mlReady ? 'text-green' : 'text-cream-dim animate-pulse-glow'}`}
+                style={{ fontFamily: 'var(--font-pixel)' }}
+              >
+                {display.mlReady ? 'ML READY' : 'ML LOADING...'}
+              </span>
+            </div>
             <div className="volume-meter">
               {Array.from({ length: volumeBars }).map((_, i) => (
                 <div
