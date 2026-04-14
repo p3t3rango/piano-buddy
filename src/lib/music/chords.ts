@@ -95,8 +95,14 @@ export function detectChordFromMidis(midis: number[]): DetectedChord | null {
   const pcs = [...new Set(midis.map(m => ((m % 12) + 12) % 12))].sort((a, b) => a - b);
   if (pcs.length < 2) return null;
 
+  // Bass pitch class — the lowest MIDI note the user actually played.
+  // Used as a tiebreaker for symmetric chords (aug, dim7) where multiple
+  // roots produce identical interval sets and scores.
+  const bassPc = ((Math.min(...midis) % 12) + 12) % 12;
+
   let best: DetectedChord | null = null;
   let bestScore = 0;
+  let bestIsBassRoot = false;
 
   // Try each pitch class as potential root
   for (const root of pcs) {
@@ -113,15 +119,23 @@ export function detectChordFromMidis(midis: number[]): DetectedChord | null {
       for (const ti of typeIntervals) {
         if (intervals.includes(ti)) matched++;
       }
+      if (matched < 2) continue;
 
       // Score: proportion of chord tones found, penalize extra notes
       const coverage = matched / typeIntervals.length;
       const extraNotes = intervals.length - matched;
       const score = coverage - extraNotes * 0.15;
 
-      // Must have at least the root and one other chord tone
-      if (matched >= 2 && score > bestScore) {
+      const isBassRoot = root === bassPc;
+      // Accept if strictly better, or tied with the bass note as root
+      // (resolves augmented/dim7 symmetry in favor of what was played in the bass)
+      const isBetter =
+        score > bestScore ||
+        (score === bestScore && isBassRoot && !bestIsBassRoot);
+
+      if (isBetter) {
         bestScore = score;
+        bestIsBassRoot = isBassRoot;
         best = {
           root,
           type,
