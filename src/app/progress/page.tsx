@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { loadProgress, xpForLevel, type ProgressData, resetProgress } from '@/lib/progress/store';
+import { loadProgress, xpForLevel, type ProgressData, resetProgress, getWeakItems } from '@/lib/progress/store';
 
 export default function ProgressPage() {
   const [data, setData] = useState<ProgressData | null>(null);
@@ -88,6 +88,54 @@ export default function ProgressPage() {
           </div>
         </div>
       </div>
+
+      {/* Focus areas — items with low accuracy across categories */}
+      {(() => {
+        const weakByType: { label: string; color: string; items: { name: string; acc: number }[] }[] = [
+          { label: 'INT', color: 'pink', items: [] },
+          { label: 'CHD', color: 'amber', items: [] },
+          { label: 'SCL', color: 'teal', items: [] },
+          { label: 'PRG', color: 'purple', items: [] },
+        ];
+        const types = ['interval', 'chord', 'scale', 'progression'] as const;
+        types.forEach((t, i) => {
+          const weak = getWeakItems(t, 0.75).slice(0, 3);
+          weakByType[i].items = weak.map(name => {
+            const map = { interval: data.intervalAccuracy, chord: data.chordAccuracy, scale: data.scaleAccuracy, progression: data.progressionAccuracy }[t];
+            const s = map[name];
+            return { name, acc: s.total > 0 ? Math.round((s.correct / s.total) * 100) : 0 };
+          });
+        });
+        const anyWeak = weakByType.some(g => g.items.length > 0);
+        if (!anyWeak) return null;
+        return (
+          <div className="w-full max-w-lg">
+            <p className="text-[8px] text-coral mb-2" style={{ fontFamily: 'var(--font-pixel)' }}>
+              FOCUS AREAS
+            </p>
+            <p className="text-[6px] text-cream-dim mb-2" style={{ fontFamily: 'var(--font-pixel)' }}>
+              Practice auto-drills weak items — these come up more often until mastered.
+            </p>
+            <div className="flex flex-col gap-1">
+              {weakByType.flatMap(g =>
+                g.items.map(it => (
+                  <div key={`${g.label}-${it.name}`} className="crt-screen p-2 flex items-center gap-2">
+                    <span className={`text-[7px] text-${g.color} w-8`} style={{ fontFamily: 'var(--font-pixel)' }}>
+                      {g.label}
+                    </span>
+                    <p className="text-[7px] text-cream truncate flex-1" style={{ fontFamily: 'var(--font-pixel)' }}>
+                      {it.name}
+                    </p>
+                    <p className="text-[7px] text-pink whitespace-nowrap" style={{ fontFamily: 'var(--font-pixel)' }}>
+                      {it.acc}%
+                    </p>
+                  </div>
+                )),
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Recent activity */}
       {recentDays.length > 0 && (

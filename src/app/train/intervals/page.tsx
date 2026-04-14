@@ -8,6 +8,7 @@ import PianoKeyboard from '@/components/PianoKeyboard';
 import InstrumentSelector from '@/components/InstrumentSelector';
 import { useExerciseState } from '@/lib/hooks/useExerciseState';
 import { useAnswerShortcuts, useKeyShortcut } from '@/lib/hooks/useAnswerShortcuts';
+import { pickWeightedItem } from '@/lib/progress/store';
 
 type Difficulty = 1 | 2 | 3;
 type PlayMode = 'melodic' | 'harmonic';
@@ -18,9 +19,9 @@ interface Question {
   mode: PlayMode;
 }
 
-function generateQuestion(difficulty: Difficulty, mode: PlayMode): Question {
-  const intervals = getIntervalsByDifficulty(difficulty).filter(i => i.semitones > 0);
-  const interval = intervals[Math.floor(Math.random() * intervals.length)];
+function generateQuestion(difficulty: Difficulty, mode: PlayMode, pool?: IntervalDef[]): Question {
+  const intervals = pool ?? getIntervalsByDifficulty(difficulty).filter(i => i.semitones > 0);
+  const interval = pickWeightedItem('interval', intervals, i => i.name);
   // Random root between C3 and C5
   const rootMidi = 48 + Math.floor(Math.random() * 24);
   return { rootMidi, interval, mode };

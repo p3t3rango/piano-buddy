@@ -8,6 +8,7 @@ import PianoKeyboard from '@/components/PianoKeyboard';
 import InstrumentSelector from '@/components/InstrumentSelector';
 import { useExerciseState } from '@/lib/hooks/useExerciseState';
 import { useAnswerShortcuts, useKeyShortcut } from '@/lib/hooks/useAnswerShortcuts';
+import { pickWeightedItem } from '@/lib/progress/store';
 
 type Difficulty = 1 | 2 | 3;
 
@@ -20,7 +21,7 @@ interface Question {
 
 function generateQuestion(difficulty: Difficulty): Question {
   const types = getChordsByDifficulty(difficulty);
-  const chordType = types[Math.floor(Math.random() * types.length)];
+  const chordType = pickWeightedItem('chord', types, t => t.name);
   const rootMidi = 48 + Math.floor(Math.random() * 12); // C3 to B3
   const rootPc = rootMidi % 12;
   const midiNotes = chordType.intervals.map(i => rootMidi + i);

@@ -8,6 +8,7 @@ import PianoKeyboard from '@/components/PianoKeyboard';
 import InstrumentSelector from '@/components/InstrumentSelector';
 import { useExerciseState } from '@/lib/hooks/useExerciseState';
 import { useAnswerShortcuts, useKeyShortcut } from '@/lib/hooks/useAnswerShortcuts';
+import { pickWeightedItem } from '@/lib/progress/store';
 
 type Difficulty = 1 | 2 | 3;
 
@@ -19,7 +20,7 @@ interface Question {
 
 function generateQuestion(difficulty: Difficulty): Question {
   const scales = getScalesByDifficulty(difficulty);
-  const scale = scales[Math.floor(Math.random() * scales.length)];
+  const scale = pickWeightedItem('scale', scales, s => s.name);
   const rootMidi = 48 + Math.floor(Math.random() * 12);
   return { rootMidi, rootPc: rootMidi % 12, scale };
 }

@@ -7,6 +7,7 @@ import PianoKeyboard from '@/components/PianoKeyboard';
 import InstrumentSelector from '@/components/InstrumentSelector';
 import { useExerciseState } from '@/lib/hooks/useExerciseState';
 import { useAnswerShortcuts, useKeyShortcut } from '@/lib/hooks/useAnswerShortcuts';
+import { pickWeightedItem } from '@/lib/progress/store';
 
 type Difficulty = 1 | 2 | 3;
 
@@ -17,21 +18,22 @@ type Difficulty = 1 | 2 | 3;
 const WHITE_NOTES = [0, 2, 4, 5, 7, 9, 11]; // C D E F G A B pitch classes
 
 function generateNote(difficulty: Difficulty): number {
+  // Pool of candidate MIDI notes by difficulty
+  let pool: number[];
   switch (difficulty) {
-    case 1: {
-      // White notes, octave 3 (C3-B3 in display, MIDI 48-59)
-      const pc = WHITE_NOTES[Math.floor(Math.random() * WHITE_NOTES.length)];
-      return 48 + pc;
-    }
-    case 2: {
-      // All 12 notes, octave 3
-      return 48 + Math.floor(Math.random() * 12);
-    }
-    case 3: {
-      // All notes across 2 octaves (MIDI 48-71)
-      return 48 + Math.floor(Math.random() * 24);
-    }
+    case 1:
+      pool = WHITE_NOTES.map(pc => 48 + pc);
+      break;
+    case 2:
+      pool = Array.from({ length: 12 }, (_, i) => 48 + i);
+      break;
+    case 3:
+      pool = Array.from({ length: 24 }, (_, i) => 48 + i);
+      break;
   }
+  // Weight by mastery — pitch items are stored as `pitch:<noteName>` under
+  // the 'interval' category (see handleAnswer).
+  return pickWeightedItem('interval', pool, m => `pitch:${midiToNoteName(m)}`);
 }
 
 function getOptions(difficulty: Difficulty): number[] {

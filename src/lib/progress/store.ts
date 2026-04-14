@@ -1,7 +1,9 @@
 // Progress tracking with localStorage persistence
 
+export type ExerciseType = 'interval' | 'chord' | 'scale' | 'progression';
+
 export interface ExerciseRecord {
-  type: 'interval' | 'chord' | 'scale' | 'progression';
+  type: ExerciseType;
   correct: boolean;
   item: string; // What was being tested (e.g., "Major 3rd", "C min")
   timestamp: number;
@@ -14,6 +16,15 @@ export interface DayStats {
   xpEarned: number;
 }
 
+// Per-item stats used for weighted selection (spaced-repetition lite)
+// `lastSeen` and `streak` are optional so existing stored data still parses.
+export interface ItemStats {
+  correct: number;
+  total: number;
+  lastSeen?: number;  // ms epoch
+  streak?: number;    // consecutive correct answers
+}
+
 export interface ProgressData {
   xp: number;
   level: number;
@@ -24,10 +35,10 @@ export interface ProgressData {
   history: ExerciseRecord[];
   dailyStats: DayStats[];
   // Per-exercise-type accuracy
-  intervalAccuracy: Record<string, { correct: number; total: number }>;
-  chordAccuracy: Record<string, { correct: number; total: number }>;
-  scaleAccuracy: Record<string, { correct: number; total: number }>;
-  progressionAccuracy: Record<string, { correct: number; total: number }>;
+  intervalAccuracy: Record<string, ItemStats>;
+  chordAccuracy: Record<string, ItemStats>;
+  scaleAccuracy: Record<string, ItemStats>;
+  progressionAccuracy: Record<string, ItemStats>;
 }
 
 const STORAGE_KEY = 'piano-bud-progress';
@@ -117,7 +128,13 @@ export function recordExercise(
   }[type];
   if (!accMap[item]) accMap[item] = { correct: 0, total: 0 };
   accMap[item].total += 1;
-  if (correct) accMap[item].correct += 1;
+  if (correct) {
+    accMap[item].correct += 1;
+    accMap[item].streak = (accMap[item].streak ?? 0) + 1;
+  } else {
+    accMap[item].streak = 0;
+  }
+  accMap[item].lastSeen = Date.now();
 
   // Update daily stats
   let dayStats = data.dailyStats.find(d => d.date === today);
@@ -164,4 +181,77 @@ export function getTodayStats(): DayStats | null {
 
 export function resetProgress(): void {
   saveProgress(defaultProgress());
+}
+
+// ── Spaced-repetition-lite: weighted item selection ──
+
+function statsMapFor(data: ProgressData, type: ExerciseType): Record<string, ItemStats> {
+  return {
+    interval: data.intervalAccuracy,
+    chord: data.chordAccuracy,
+    scale: data.scaleAccuracy,
+    progression: data.progressionAccuracy,
+  }[type];
+}
+
+/**
+ * Compute a selection weight for an item. Higher weight = more likely to be
+ * picked. Unseen items get a strong boost so they're prioritized. Weak items
+ * (low accuracy) get a boost. Stale items (not seen in a while) get a mild
+ * boost. Recently-answered-correct items get damped.
+ */
+function weightForItem(stats: ItemStats | undefined): number {
+  if (!stats || stats.total === 0) return 3.0; // New items: strong priority
+  const accuracy = stats.correct / stats.total;
+  const hoursSinceSeen = stats.lastSeen ? (Date.now() - stats.lastSeen) / 3_600_000 : 1000;
+  const streak = stats.streak ?? 0;
+
+  // Base weight inversely related to accuracy (1.0 when perfect, 2.5 when 0%)
+  let w = 1 + (1 - accuracy) * 1.5;
+  // Staleness boost: +0.5 after 24h, capped
+  w += Math.min(0.5, hoursSinceSeen / 48);
+  // Damping for recent streaks of correct answers
+  if (streak >= 3) w *= 0.6;
+  if (streak >= 6) w *= 0.6;
+  return Math.max(0.1, w);
+}
+
+/**
+ * Weighted-random pick from a list. `getKey` maps each item to its stats key.
+ * Falls back to uniform random if all weights are zero.
+ */
+export function pickWeightedItem<T>(
+  type: ExerciseType,
+  items: T[],
+  getKey: (item: T) => string,
+): T {
+  if (items.length === 0) throw new Error('pickWeightedItem: empty list');
+  const data = loadProgress();
+  const map = statsMapFor(data, type);
+  const weights = items.map(it => weightForItem(map[getKey(it)]));
+  const total = weights.reduce((a, b) => a + b, 0);
+  if (total <= 0) return items[Math.floor(Math.random() * items.length)];
+  let r = Math.random() * total;
+  for (let i = 0; i < items.length; i++) {
+    r -= weights[i];
+    if (r <= 0) return items[i];
+  }
+  return items[items.length - 1];
+}
+
+/**
+ * Returns items whose accuracy is below `threshold`, sorted weakest-first.
+ * Used by "Weak Areas" drill. Items never answered are excluded (no data).
+ */
+export function getWeakItems(type: ExerciseType, threshold = 0.7): string[] {
+  const data = loadProgress();
+  const map = statsMapFor(data, type);
+  return Object.entries(map)
+    .filter(([, s]) => s.total >= 3 && s.correct / s.total < threshold)
+    .sort(([, a], [, b]) => a.correct / a.total - b.correct / b.total)
+    .map(([key]) => key);
+}
+
+export function getItemStats(type: ExerciseType, item: string): ItemStats | undefined {
+  return statsMapFor(loadProgress(), type)[item];
 }
