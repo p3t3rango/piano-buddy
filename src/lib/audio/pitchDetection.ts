@@ -11,6 +11,22 @@ export interface PitchResult {
   confidence: number;
 }
 
+// Detection sensitivity — affects the clarity and RMS gates for pitch
+// detection. "Low" rejects more noise at the cost of quiet signals; "high"
+// accepts weaker signals but will pick up more ambient noise.
+export type Sensitivity = 'low' | 'medium' | 'high';
+
+interface SensitivityConfig {
+  clarityThreshold: number;
+  rmsGate: number;
+}
+
+const SENSITIVITY_CONFIGS: Record<Sensitivity, SensitivityConfig> = {
+  low:    { clarityThreshold: 0.75, rmsGate: 0.005 },
+  medium: { clarityThreshold: 0.65, rmsGate: 0.003 },
+  high:   { clarityThreshold: 0.55, rmsGate: 0.002 },
+};
+
 export interface ChromaResult {
   chroma: number[];
   activePitchClasses: number[];
@@ -68,6 +84,9 @@ export class PitchDetector {
 
   // Debug
   public mlDebug = '';
+
+  // Sensitivity — adjustable at runtime, affects detectPitch() gates
+  private sensitivity: Sensitivity = 'medium';
 
   private static readonly FFT_SIZE = 4096;
 
@@ -159,6 +178,20 @@ export class PitchDetector {
   isRunning(): boolean { return this.running; }
   isMLReady(): boolean { return this.modelReady; }
 
+  setSensitivity(level: Sensitivity): void {
+    this.sensitivity = level;
+  }
+
+  getSensitivity(): Sensitivity {
+    return this.sensitivity;
+  }
+
+  // Kick off ML model download without requiring mic access — safe to call
+  // from page mount so the model is warm by the time the user taps Start.
+  preloadMLModel(): void {
+    void this.loadModel();
+  }
+
   // RMS using its own buffer — doesn't interfere with Pitchy
   // Also adjusts auto-gain to keep signal at a good level
   getRMS(): number {
@@ -211,15 +244,15 @@ export class PitchDetector {
         sum += this.pitchBuf[i] * this.pitchBuf[i];
       }
       const rms = Math.sqrt(sum / this.pitchBuf.length);
-      if (rms < 0.003) return null; // Very low gate for mobile sensitivity
+      const gates = SENSITIVITY_CONFIGS[this.sensitivity];
+      if (rms < gates.rmsGate) return null;
 
       const [pitch, clarity] = this.pitchyDetector.findPitch(
         this.pitchBuf,
         this.audioCtx.sampleRate
       );
 
-      // Lower clarity for phone mics (weaker signal = lower clarity)
-      if (clarity < 0.65 || pitch < 60 || pitch > 2100) return null;
+      if (clarity < gates.clarityThreshold || pitch < 60 || pitch > 2100) return null;
 
       return {
         frequency: pitch,

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import PianoKeyboard from '@/components/PianoKeyboard';
-import { PitchDetector } from '@/lib/audio/pitchDetection';
+import { PitchDetector, type Sensitivity } from '@/lib/audio/pitchDetection';
 import { detectChordFromMidis, formatChord, formatChordFull, type DetectedChord } from '@/lib/music/chords';
 import { getIntervalName } from '@/lib/music/intervals';
 import { unlockAudio, playNote } from '@/lib/audio/synth';
@@ -46,6 +46,7 @@ export default function ListenPage() {
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [display, setDisplay] = useState<DisplayState>(emptyDisplay);
+  const [sensitivity, setSensitivity] = useState<Sensitivity>('medium');
 
   const detectorRef = useRef<PitchDetector | null>(null);
   const rafRef = useRef<number>(0);
@@ -211,6 +212,7 @@ export default function ListenPage() {
       if (!detectorRef.current) {
         detectorRef.current = new PitchDetector();
       }
+      detectorRef.current.setSensitivity(sensitivity);
       await detectorRef.current.start();
       setConnecting(false);
       setIsListening(true);
@@ -242,11 +244,20 @@ export default function ListenPage() {
   };
 
   useEffect(() => {
+    // Warm up the ML model on page mount so the first chord detection
+    // doesn't incur the ~900KB download delay.
+    if (!detectorRef.current) detectorRef.current = new PitchDetector();
+    detectorRef.current.preloadMLModel();
     return () => {
       detectorRef.current?.stop();
       cancelAnimationFrame(rafRef.current);
     };
   }, []);
+
+  // Propagate sensitivity changes to the running detector
+  useEffect(() => {
+    detectorRef.current?.setSensitivity(sensitivity);
+  }, [sensitivity]);
 
   // Volume bars
   const volumeBars = 8;
@@ -257,6 +268,22 @@ export default function ListenPage() {
       <h2 className="text-sm text-amber" style={{ fontFamily: 'var(--font-pixel)' }}>
         LISTEN MODE
       </h2>
+
+      {/* Sensitivity selector */}
+      <div className="flex gap-2 items-center">
+        <span className="text-[7px] text-cream-dim" style={{ fontFamily: 'var(--font-pixel)' }}>
+          SENSITIVITY
+        </span>
+        {(['low', 'medium', 'high'] as Sensitivity[]).map(level => (
+          <button
+            key={level}
+            onClick={() => setSensitivity(level)}
+            className={`badge ${level === 'low' ? 'badge-easy' : level === 'medium' ? 'badge-medium' : 'badge-hard'} ${sensitivity === level ? 'ring-1 ring-current' : 'opacity-50'}`}
+          >
+            {level}
+          </button>
+        ))}
+      </div>
 
       {/* Main display screen */}
       <div className="crt-screen w-full max-w-lg p-6 flex flex-col items-center gap-4 min-h-[280px]">
