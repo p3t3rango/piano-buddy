@@ -47,6 +47,13 @@ const EXERCISES = [
     color: 'teal',
     icon: '✎',
   },
+  {
+    href: '/train/rhythm',
+    title: 'Rhythm',
+    desc: 'Tap in time with the metronome',
+    color: 'amber',
+    icon: '◆',
+  },
 ];
 
 export default function TrainPage() {
