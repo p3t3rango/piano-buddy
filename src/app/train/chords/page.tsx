@@ -7,6 +7,7 @@ import { pitchClassName } from '@/lib/music/theory';
 import PianoKeyboard from '@/components/PianoKeyboard';
 import InstrumentSelector from '@/components/InstrumentSelector';
 import { useExerciseState } from '@/lib/hooks/useExerciseState';
+import { useAnswerShortcuts, useKeyShortcut } from '@/lib/hooks/useAnswerShortcuts';
 
 type Difficulty = 1 | 2 | 3;
 
@@ -57,6 +58,10 @@ export default function ChordTrainerPage() {
     if (!question) return;
     playChord(question.midiNotes, 1.5, instrument);
   };
+
+  useAnswerShortcuts(options.length, i => handleAnswer(options[i].shortName), answered || !question);
+  useKeyShortcut('Enter', newQuestion, !!question && !answered);
+  useKeyShortcut('r', replayQuestion, !question);
 
   return (
     <div className="flex flex-col items-center flex-1 px-4 py-4 gap-4">
@@ -139,8 +144,8 @@ export default function ChordTrainerPage() {
       {/* Answer options */}
       {question && (
         <div className="grid grid-cols-2 gap-3 w-full max-w-lg">
-          {options.map(chord => {
-            let className = 'option-btn';
+          {options.map((chord, idx) => {
+            let className = 'option-btn relative';
             if (answered) {
               if (chord.shortName === question.chordType.shortName) {
                 className += ' correct';
@@ -155,6 +160,11 @@ export default function ChordTrainerPage() {
                 className={className}
                 disabled={answered}
               >
+                {idx < 9 && (
+                  <span className="absolute top-1 left-1 text-[7px] opacity-40" style={{ fontFamily: 'var(--font-pixel)' }}>
+                    {idx + 1}
+                  </span>
+                )}
                 <div>
                   <div className="text-[10px]">{chord.name}</div>
                   <div className="text-[7px] opacity-60 mt-1">{chord.shortName}</div>

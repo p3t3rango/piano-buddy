@@ -5,7 +5,7 @@ import PianoKeyboard from '@/components/PianoKeyboard';
 import { PitchDetector } from '@/lib/audio/pitchDetection';
 import { detectChordFromMidis, formatChord, formatChordFull, type DetectedChord } from '@/lib/music/chords';
 import { getIntervalName } from '@/lib/music/intervals';
-import { unlockAudio } from '@/lib/audio/synth';
+import { unlockAudio, playNote } from '@/lib/audio/synth';
 import { midiToNoteName, midiToPitchClass, freqToCentsOff, NOTE_NAMES } from '@/lib/music/theory';
 
 // Stable display state — updated via refs, flushed to React on a throttle
@@ -361,13 +361,14 @@ export default function ListenPage() {
         )}
       </div>
 
-      {/* Piano keyboard visualization */}
+      {/* Piano keyboard visualization (tap keys to play) */}
       <div className="w-full max-w-lg overflow-hidden">
         <PianoKeyboard
           startMidi={48}
           endMidi={72}
           activeNotes={display.activePCs}
           activeMode="pitchClass"
+          onKeyPress={midi => playNote({ midi, duration: 1.2, instrument: 'piano', volume: 0.4 })}
         />
       </div>
 

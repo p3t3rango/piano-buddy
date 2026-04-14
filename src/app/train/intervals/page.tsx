@@ -7,6 +7,7 @@ import { midiToNoteName } from '@/lib/music/theory';
 import PianoKeyboard from '@/components/PianoKeyboard';
 import InstrumentSelector from '@/components/InstrumentSelector';
 import { useExerciseState } from '@/lib/hooks/useExerciseState';
+import { useAnswerShortcuts, useKeyShortcut } from '@/lib/hooks/useAnswerShortcuts';
 
 type Difficulty = 1 | 2 | 3;
 type PlayMode = 'melodic' | 'harmonic';
@@ -58,6 +59,10 @@ export default function IntervalTrainerPage() {
     if (!question) return;
     playInterval(question.rootMidi, question.interval.semitones, question.mode, instrument);
   };
+
+  useAnswerShortcuts(options.length, i => handleAnswer(options[i].semitones), answered || !question);
+  useKeyShortcut('Enter', newQuestion, !!question && !answered);
+  useKeyShortcut('r', replayQuestion, !question);
 
   return (
     <div className="flex flex-col items-center flex-1 px-4 py-4 gap-4">
@@ -153,8 +158,8 @@ export default function IntervalTrainerPage() {
       {/* Answer options */}
       {question && (
         <div className="grid grid-cols-2 gap-3 w-full max-w-lg">
-          {options.map(interval => {
-            let className = 'option-btn';
+          {options.map((interval, idx) => {
+            let className = 'option-btn relative';
             if (answered) {
               if (interval.semitones === question.interval.semitones) {
                 className += ' correct';
@@ -169,6 +174,11 @@ export default function IntervalTrainerPage() {
                 className={className}
                 disabled={answered}
               >
+                {idx < 9 && (
+                  <span className="absolute top-1 left-1 text-[7px] opacity-40" style={{ fontFamily: 'var(--font-pixel)' }}>
+                    {idx + 1}
+                  </span>
+                )}
                 <div>
                   <div className="text-[10px]">{interval.name}</div>
                   <div className="text-[7px] opacity-60 mt-1">{interval.shortName}</div>

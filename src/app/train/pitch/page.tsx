@@ -6,6 +6,7 @@ import { midiToNoteName, NOTE_NAMES } from '@/lib/music/theory';
 import PianoKeyboard from '@/components/PianoKeyboard';
 import InstrumentSelector from '@/components/InstrumentSelector';
 import { useExerciseState } from '@/lib/hooks/useExerciseState';
+import { useAnswerShortcuts, useKeyShortcut } from '@/lib/hooks/useAnswerShortcuts';
 
 type Difficulty = 1 | 2 | 3;
 
@@ -103,6 +104,10 @@ export default function PitchTrainerPage() {
     setTargetMidi(null);
   };
 
+  useAnswerShortcuts(options.length, i => handleAnswer(options[i].midi), answered || !targetMidi);
+  useKeyShortcut('Enter', newQuestion, !!targetMidi && !answered);
+  useKeyShortcut('r', replay, !targetMidi);
+
   return (
     <div className="flex flex-col items-center flex-1 px-4 py-4 gap-4">
       <h2 className="text-sm text-coral" style={{ fontFamily: 'var(--font-pixel)' }}>
@@ -190,7 +195,7 @@ export default function PitchTrainerPage() {
       {/* Answer buttons */}
       {targetMidi && (
         <div className={`grid gap-2 w-full max-w-lg ${options.length <= 7 ? 'grid-cols-4' : 'grid-cols-4'}`}>
-          {options.map(opt => {
+          {options.map((opt, idx) => {
             const isCorrect = difficulty === 3
               ? (opt.midi % 12) === (targetMidi % 12)
               : opt.midi === targetMidi;
@@ -198,7 +203,7 @@ export default function PitchTrainerPage() {
               ? selectedAnswer !== null && (selectedAnswer % 12) === (opt.midi % 12)
               : selectedAnswer === opt.midi;
 
-            let className = 'option-btn';
+            let className = 'option-btn relative';
             if (answered) {
               if (isCorrect) className += ' correct';
               else if (isSelected) className += ' incorrect';
@@ -210,6 +215,11 @@ export default function PitchTrainerPage() {
                 className={className}
                 disabled={answered}
               >
+                {idx < 9 && (
+                  <span className="absolute top-1 left-1 text-[7px] opacity-40" style={{ fontFamily: 'var(--font-pixel)' }}>
+                    {idx + 1}
+                  </span>
+                )}
                 <div className="text-[10px]">{opt.name}</div>
               </button>
             );

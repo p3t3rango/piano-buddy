@@ -7,6 +7,7 @@ import { pitchClassName } from '@/lib/music/theory';
 import PianoKeyboard from '@/components/PianoKeyboard';
 import InstrumentSelector from '@/components/InstrumentSelector';
 import { useExerciseState } from '@/lib/hooks/useExerciseState';
+import { useAnswerShortcuts, useKeyShortcut } from '@/lib/hooks/useAnswerShortcuts';
 
 type Difficulty = 1 | 2 | 3;
 
@@ -54,6 +55,10 @@ export default function ScaleTrainerPage() {
     if (!question) return;
     playScale(question.rootMidi, question.scale.intervals, 250, instrument);
   };
+
+  useAnswerShortcuts(options.length, i => handleAnswer(options[i].name), answered || !question);
+  useKeyShortcut('Enter', newQuestion, !!question && !answered);
+  useKeyShortcut('r', replayQuestion, !question);
 
   return (
     <div className="flex flex-col items-center flex-1 px-4 py-4 gap-4">
@@ -131,8 +136,8 @@ export default function ScaleTrainerPage() {
 
       {question && (
         <div className="grid grid-cols-2 gap-3 w-full max-w-lg">
-          {options.map(scale => {
-            let className = 'option-btn';
+          {options.map((scale, idx) => {
+            let className = 'option-btn relative';
             if (answered) {
               if (scale.name === question.scale.name) className += ' correct';
               else if (scale.name === selectedAnswer) className += ' incorrect';
@@ -144,6 +149,11 @@ export default function ScaleTrainerPage() {
                 className={className}
                 disabled={answered}
               >
+                {idx < 9 && (
+                  <span className="absolute top-1 left-1 text-[7px] opacity-40" style={{ fontFamily: 'var(--font-pixel)' }}>
+                    {idx + 1}
+                  </span>
+                )}
                 <div className="text-[10px]">{scale.name}</div>
               </button>
             );

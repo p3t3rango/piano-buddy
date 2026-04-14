@@ -6,6 +6,7 @@ import { playProgression, unlockAudio } from '@/lib/audio/synth';
 import { pitchClassName } from '@/lib/music/theory';
 import InstrumentSelector from '@/components/InstrumentSelector';
 import { useExerciseState } from '@/lib/hooks/useExerciseState';
+import { useAnswerShortcuts, useKeyShortcut } from '@/lib/hooks/useAnswerShortcuts';
 
 type Difficulty = 1 | 2 | 3;
 
@@ -53,6 +54,10 @@ export default function ProgressionTrainerPage() {
     if (!question) return;
     playProgression(question.rootMidi, question.progression.degrees, question.progression.chordQualities, 900, instrument);
   };
+
+  useAnswerShortcuts(options.length, i => handleAnswer(options[i].name), answered || !question);
+  useKeyShortcut('Enter', newQuestion, !!question && !answered);
+  useKeyShortcut('r', replayQuestion, !question);
 
   return (
     <div className="flex flex-col items-center flex-1 px-4 py-4 gap-4">
@@ -130,8 +135,8 @@ export default function ProgressionTrainerPage() {
 
       {question && (
         <div className="grid grid-cols-1 gap-3 w-full max-w-lg">
-          {options.map(prog => {
-            let className = 'option-btn';
+          {options.map((prog, idx) => {
+            let className = 'option-btn relative';
             if (answered) {
               if (prog.name === question.progression.name) className += ' correct';
               else if (prog.name === selectedAnswer) className += ' incorrect';
@@ -143,6 +148,11 @@ export default function ProgressionTrainerPage() {
                 className={className}
                 disabled={answered}
               >
+                {idx < 9 && (
+                  <span className="absolute top-1 left-1 text-[7px] opacity-40" style={{ fontFamily: 'var(--font-pixel)' }}>
+                    {idx + 1}
+                  </span>
+                )}
                 <div>
                   <div className="text-[10px]">{prog.numerals.join(' - ')}</div>
                   <div className="text-[7px] opacity-60 mt-1">{prog.name}</div>
