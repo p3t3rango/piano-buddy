@@ -392,9 +392,9 @@ export function playSfx(type: 'correct' | 'incorrect' | 'levelup' | 'click'): vo
       [0, 0.12].forEach((delay, i) => {
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
-        osc.type = 'square';
+        osc.type = 'triangle';
         osc.frequency.setValueAtTime([880, 1320][i], now + delay);
-        gain.gain.setValueAtTime(0.15, now + delay);
+        gain.gain.setValueAtTime(0.07, now + delay);
         gain.gain.linearRampToValueAtTime(0, now + delay + 0.15);
         osc.connect(gain);
         gain.connect(ctx.destination);
@@ -406,10 +406,10 @@ export function playSfx(type: 'correct' | 'incorrect' | 'levelup' | 'click'): vo
     case 'incorrect': {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc.type = 'square';
+      osc.type = 'triangle';
       osc.frequency.setValueAtTime(300, now);
       osc.frequency.linearRampToValueAtTime(150, now + 0.3);
-      gain.gain.setValueAtTime(0.15, now);
+      gain.gain.setValueAtTime(0.08, now);
       gain.gain.linearRampToValueAtTime(0, now + 0.3);
       osc.connect(gain);
       gain.connect(ctx.destination);
@@ -421,9 +421,9 @@ export function playSfx(type: 'correct' | 'incorrect' | 'levelup' | 'click'): vo
       [523, 659, 784, 1047].forEach((freq, i) => {
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
-        osc.type = 'square';
+        osc.type = 'triangle';
         osc.frequency.setValueAtTime(freq, now + i * 0.1);
-        gain.gain.setValueAtTime(0.12, now + i * 0.1);
+        gain.gain.setValueAtTime(0.06, now + i * 0.1);
         gain.gain.linearRampToValueAtTime(0, now + i * 0.1 + 0.2);
         osc.connect(gain);
         gain.connect(ctx.destination);
@@ -435,9 +435,9 @@ export function playSfx(type: 'correct' | 'incorrect' | 'levelup' | 'click'): vo
     case 'click': {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc.type = 'square';
+      osc.type = 'triangle';
       osc.frequency.setValueAtTime(800, now);
-      gain.gain.setValueAtTime(0.1, now);
+      gain.gain.setValueAtTime(0.05, now);
       gain.gain.linearRampToValueAtTime(0, now + 0.03);
       osc.connect(gain);
       gain.connect(ctx.destination);
